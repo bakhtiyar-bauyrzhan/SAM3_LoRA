@@ -139,43 +139,85 @@ class COCOSegmentDataset(Dataset):
             box_tensor /= self.resolution
 
             # Handle segmentation mask (polygon or RLE format)
+            # segment = None
+            # segmentation = ann.get("segmentation", None)
+
+            # if segmentation:
+            #     try:
+            #         # Check if it's RLE format (dict) or polygon format (list)
+            #         if isinstance(segmentation, dict):
+            #             # RLE format: {"counts": "...", "size": [h, w]}
+            #             mask_np = mask_utils.decode(segmentation)
+            #         elif isinstance(segmentation, list):
+            #             # Polygon format: [[x1, y1, x2, y2, ...], ...]
+            #             # Convert polygon to RLE, then decode
+            #             rles = mask_utils.frPyObjects(segmentation, orig_h, orig_w)
+            #             rle = mask_utils.merge(rles)
+            #             mask_np = mask_utils.decode(rle)
+            #         else:
+            #             print(f"Warning: Unknown segmentation format: {type(segmentation)}")
+            #             segment = None
+            #             continue
+
+            #         # Resize mask to model resolution
+            #         mask_t = torch.from_numpy(mask_np).float().unsqueeze(0).unsqueeze(0)
+            #         mask_t = torch.nn.functional.interpolate(
+            #             mask_t,
+            #             size=(self.resolution, self.resolution),
+            #             mode="nearest"
+            #         )
+            #         segment = mask_t.squeeze() > 0.5  # [1008, 1008] boolean tensor
+
+            #     except Exception as e:
+            #         print(f"Warning: Error processing mask for image {img_id}, ann {i}: {e}")
+            #         segment = None
+
+            # obj = Object(
+            #     bbox=box_tensor,
+            #     area=(box_tensor[2]-box_tensor[0])*(box_tensor[3]-box_tensor[1]),
+            #     object_id=i,
+            #     segment=segment
+            # )
+            # objects.append(obj)
+
+            # Handle segmentation mask (polygon or RLE format)
             segment = None
             segmentation = ann.get("segmentation", None)
 
+            # if no mask or array is empty --> skip
+            if not segmentation or (isinstance(segmentation, list) and len(segmentation) == 0):
+                continue 
+
             if segmentation:
-                try:
+                try:=
                     # Check if it's RLE format (dict) or polygon format (list)
                     if isinstance(segmentation, dict):
-                        # RLE format: {"counts": "...", "size": [h, w]}
                         mask_np = mask_utils.decode(segmentation)
                     elif isinstance(segmentation, list):
-                        # Polygon format: [[x1, y1, x2, y2, ...], ...]
-                        # Convert polygon to RLE, then decode
                         rles = mask_utils.frPyObjects(segmentation, orig_h, orig_w)
                         rle = mask_utils.merge(rles)
                         mask_np = mask_utils.decode(rle)
                     else:
-                        print(f"Warning: Unknown segmentation format: {type(segmentation)}")
-                        segment = None
-                        continue
+                        continue # skip
 
-                    # Resize mask to model resolution
                     mask_t = torch.from_numpy(mask_np).float().unsqueeze(0).unsqueeze(0)
                     mask_t = torch.nn.functional.interpolate(
                         mask_t,
                         size=(self.resolution, self.resolution),
                         mode="nearest"
                     )
-                    segment = mask_t.squeeze() > 0.5  # [1008, 1008] boolean tensor
+                    segment = mask_t.squeeze() > 0.5  
 
                 except Exception as e:
-                    print(f"Warning: Error processing mask for image {img_id}, ann {i}: {e}")
-                    segment = None
+                    # 2. if bad polygon found --> continue
+                    # print(f"Warning: Error processing mask for image {img_id}, ann {i}: {e}")
+                    continue 
 
+            # if mask is good, then add
             obj = Object(
                 bbox=box_tensor,
-                area=(box_tensor[2]-box_tensor[0])*(box_tensor[3]-box_tensor[1]),
-                object_id=i,
+                area=(box_tensor[2] * box_tensor[3]).item(),
+                object_id=len(objects),  # list length fix
                 segment=segment
             )
             objects.append(obj)

@@ -1,0 +1,104 @@
+# ============================================================================
+# SAM3 LoRA Configuration: Leaf Segmentation (Micro-dataset, No Labels)
+# Optimized for RTX 5090 32GB
+#
+# This configuration fine-tunes a pre-trained SAM3 model for leaf segmentation
+# using Low-Rank Adaptation (LoRA) to avoid catastrophic forgetting on a small
+# dataset (~200 images). Only the mask decoder and DETR decoder are trainable.
+# ============================================================================
+
+# ============================================================================
+# Model Settings
+# ============================================================================
+model:
+  name: "facebook/sam3"              # Pre-trained SAM3 model identifier (HuggingFace)
+  cache_dir: null                     # Cache directory for downloaded models (null = default cache)
+
+# ============================================================================
+# LoRA Configuration
+# ============================================================================
+# LoRA applies low-rank decomposition to weight matrices, dramatically reducing
+# the number of trainable parameters while maintaining adaptation capacity.
+lora:
+  rank: 16                    # LoRA rank (higher = more capacity but more parameters; 8 is good for small datasets)
+  alpha: 32                  # LoRA scaling factor (typically 2 * rank; controls the magnitude of LoRA updates)
+  dropout: 0.1               # Dropout for LoRA layers (regularization to prevent overfitting on small datasets)
+
+  # Target modules for LoRA application - which layer types to adapt
+  # These are attention projection matrices in transformer blocks
+  target_modules:
+    - "q_proj"               # Query projection in multi-head attention
+    - "k_proj"               # Key projection in multi-head attention
+    - "v_proj"               # Value projection in multi-head attention
+    - "out_proj"             # Output projection after attention
+
+  # Component freeze strategy - CRITICAL for small datasets (200 images)
+  # Freezing backbone prevents catastrophic forgetting of pre-trained features
+  apply_to_vision_encoder: false     # FROZEN - Vision backbone (ViT): pre-trained features are robust, don't corrupt them
+  apply_to_text_encoder: false       # FROZEN - Text encoder (CLIP): no text labels in dataset, not needed
+  apply_to_geometry_encoder: false   # FROZEN - Geometry encoder: pre-trained geometry understanding is valuable
+  apply_to_detr_encoder: false       # FROZEN - DETR encoder: backbone detection features should be preserved
+  apply_to_detr_decoder: true        # TRAINABLE - DETR decoder: improves object localization (bounding boxes)
+  apply_to_mask_decoder: true        # TRAINABLE - Mask decoder: PRIMARY component for leaf edge/contour refinement
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+training:
+  # DATA SETTINGS
+  data_dir: "data"             # Root directory containing train/, valid/, test/ subfolders with COCO annotations
+  batch_size: 2                # Batch size per GPU. RTX 5090 can handle 8+ but 2-4 is safer for stability
+  num_workers: 8               # Number of data loading worker threads (increase for faster data loading from disk)
+
+  # OPTIMIZER SETTINGS
+  learning_rate: 2e-4          # Learning rate for AdamW. Higher than typical (1e-5) because only decoder is trained
+  weight_decay: 0.05           # L2 regularization strength (higher = stronger regularization for small datasets)
+  adam_beta1: 0.9              # Exponential decay rate for 1st moment estimates (standard value)
+  adam_beta2: 0.999            # Exponential decay rate for 2nd moment estimates (standard value)
+  adam_epsilon: 1e-8           # Small constant for numerical stability in Adam optimizer
+  max_grad_norm: 1.0           # Gradient clipping threshold (prevents exploding gradients)
+
+  # TRAINING DURATION
+  num_epochs: 50              # Total training epochs (small dataset overfits quickly, so monitor validation loss carefully)
+  warmup_steps: 50            # Linear LR warmup steps (proportional to dataset size; too many = slow start)
+  lr_scheduler: "cosine"      # Learning rate schedule (cosine annealing: gradual LR reduction after warmup)
+
+  # LOGGING & CHECKPOINTING
+  logging_steps: 5             # Log training metrics every N steps (progress tracking, loss monitoring)
+  eval_steps: 50               # Run validation every N steps (frequent validation to catch overfitting early)
+  save_steps: 50               # Save checkpoint every N steps (balance between storage and recovery capability)
+  save_total_limit: 3          # Keep only last 3 checkpoints (prevent disk space issues)
+
+  # PRECISION & REPRODUCIBILITY
+  mixed_precision: "bf16"      # Use bfloat16 for faster training on RTX 5090 (vs float32)
+  seed: 42                     # Random seed for reproducibility (same seed = same results if deterministic ops used)
+
+  # GRADIENT ACCUMULATION
+  # Effective batch size = batch_size × gradient_accumulation_steps
+  # With batch_size=2, grad_accum=4 → effective_batch=8 (smoother gradients, larger effective batch)
+  gradient_accumulation_steps: 8
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  output_dir: "outputs/leaves_lora"   # Directory to save trained LoRA weights and checkpoints
+  logging_dir: "logs"                  # Directory for TensorBoard logs (monitor training: tensorboard --logdir logs)
+  save_lora_only: true                 # Only save LoRA weights, not full model (much smaller file size, ~MB vs GB)
+  push_to_hub: false                   # Don't push model to HuggingFace Hub (set true to share model publicly)
+
+# ============================================================================
+# Evaluation Configuration
+# ============================================================================
+evaluation:
+  metric: "iou"                        # Primary evaluation metric (Intersection over Union for segmentation)
+  save_predictions: false              # Don't save prediction outputs during validation (saves disk space)
+  compute_metrics_during_training: true  # Compute metrics during training (useful for monitoring, but slower)
+
+# ============================================================================
+# Hardware Configuration
+# ============================================================================
+hardware:
+  device: "cuda"                       # Use GPU (cuda) instead of CPU
+  dataloader_pin_memory: true          # Pin memory in DataLoader for faster GPU transfer (PCIe bandwidth optimization)
+  use_compile: false                   # Disable torch.compile() (not stable on all hardware, experimental feature)
