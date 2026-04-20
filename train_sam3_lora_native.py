@@ -54,6 +54,7 @@ from lora_layers import LoRAConfig, apply_lora_to_model, save_lora_weights, coun
 from torchvision.transforms import v2
 import pycocotools.mask as mask_utils  # Required for RLE mask decoding in COCO dataset
 from sam3.train.masks_ops import rle_encode  # For encoding masks to RLE format
+from torchvision import tv_tensors  # For synchronous augmentations
 
 # Note: Evaluation modules (mAP, cgF1, NMS) are in validate_sam3_lora.py
 # Training only computes validation loss, following SAM3's approach
@@ -147,11 +148,20 @@ class COCOSegmentDataset(Dataset):
         print(f"  Categories: {self.categories}")
 
         self.resolution = 1008
-        self.transform = v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-        ])
+        if self.split == "train":
+            self.transform = v2.Compose([
+                v2.ToImage(),
+                v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+                v2.RandomApply([v2.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))], p=0.3),
+                v2.ToDtype(torch.float32, scale=True),
+                v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            ])
+        else:
+            self.transform = v2.Compose([
+                v2.ToImage(),
+                v2.ToDtype(torch.float32, scale=True),
+                v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            ])
 
     def __len__(self):
         return len(self.image_ids)
@@ -257,7 +267,7 @@ class COCOSegmentDataset(Dataset):
                 continue 
 
             if segmentation:
-                try:=
+                try:
                     # Check if it's RLE format (dict) or polygon format (list)
                     if isinstance(segmentation, dict):
                         mask_np = mask_utils.decode(segmentation)

@@ -86,7 +86,8 @@ output:
   logging_dir: "logs"                  # Directory for TensorBoard logs (monitor training: tensorboard --logdir logs)
   save_lora_only: true                 # Only save LoRA weights, not full model (much smaller file size, ~MB vs GB)
   push_to_hub: false                   # Don't push model to HuggingFace Hub (set true to share model publicly)
-
+inference:
+  min_area: 500
 # ============================================================================
 # Evaluation Configuration
 # ============================================================================

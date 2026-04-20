@@ -58,7 +58,7 @@ def mask_to_coco_annotations(mask_tensor, img_id, start_ann_id, orig_w, orig_h, 
                 
     return annotations, current_ann_id
 
-def run_inference_and_save_coco(model, image_paths, text_prompt, output_json_path, device, resolution=1008, prob_threshold=0.3):
+def run_inference_and_save_coco(model, image_paths, text_prompt, output_json_path, device, resolution=1008, prob_threshold=0.3, min_area=50):
     transform = ComposeAPI([
         RandomResizeAPI(sizes=[resolution], max_size=resolution, square=True, consistent_transform=False),
         ToTensorAPI(),
@@ -124,7 +124,7 @@ def run_inference_and_save_coco(model, image_paths, text_prompt, output_json_pat
                     nms_keep = nms(boxes_xyxy, valid_scores, iou_threshold=0.5)
                     for mask in valid_masks[nms_keep]:
                         anns, ann_id_counter = mask_to_coco_annotations(
-                            mask, img_id_counter, ann_id_counter, orig_w, orig_h
+                            mask, img_id_counter, ann_id_counter, orig_w, orig_h, min_area=min_area
                         )
                         coco_data["annotations"].extend(anns)
                     
@@ -153,6 +153,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🔧 Settings are loaded from {args.config}")
     
+    # Читаем значение из конфига (по умолчанию 200, если не задано)
+    config_min_area = cfg.get('inference', {}).get('min_area', 200)
+    
     image_paths = [os.path.join(args.image_dir, f) for f in os.listdir(args.image_dir) 
                    if Path(f).suffix.lower() in {'.jpg', '.jpeg', '.png'}]
 
@@ -169,7 +172,7 @@ def main():
     model.to(device)
 
     base_json = os.path.join(args.out_dir, "base_annotations.coco.json")
-    run_inference_and_save_coco(model, image_paths, args.prompt, base_json, device, prob_threshold=args.threshold)
+    run_inference_and_save_coco(model, image_paths, args.prompt, base_json, device, prob_threshold=args.threshold, min_area=config_min_area)
 
     # 3. LoRA preparation from config
     print("\n🔗 Applying LoRA...")
@@ -178,7 +181,7 @@ def main():
         rank=l_cfg['rank'],
         alpha=l_cfg['alpha'],
         dropout=l_cfg.get('dropout', 0.1),
-        target_modules=l_cfg['target_modules'], # ["q_proj", "v_proj", ...]
+        target_modules=l_cfg['target_modules'], 
         apply_to_vision_encoder=l_cfg.get('apply_to_vision_encoder', False),
         apply_to_text_encoder=l_cfg.get('apply_to_text_encoder', False),
         apply_to_geometry_encoder=l_cfg.get('apply_to_geometry_encoder', False),
@@ -200,7 +203,8 @@ def main():
 
     # 4. Lora inference
     lora_json = os.path.join(args.out_dir, "lora_annotations.coco.json")
-    run_inference_and_save_coco(model, image_paths, args.prompt, lora_json, device, prob_threshold=args.threshold)
+    run_inference_and_save_coco(model, image_paths, args.prompt, lora_json, device, prob_threshold=args.threshold, min_area=config_min_area)
+    
     print("\n🚀 All files are saved in folder:", args.out_dir)
 
 if __name__ == "__main__":
