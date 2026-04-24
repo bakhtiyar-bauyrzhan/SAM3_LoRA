@@ -52,15 +52,15 @@ training:
 
   # OPTIMIZER SETTINGS
   learning_rate: 2e-4          # Learning rate for AdamW. Higher than typical (1e-5) because only decoder is trained
-  weight_decay: 0.05           # L2 regularization strength (higher = stronger regularization for small datasets)
+  weight_decay: 0.01           # L2 regularization strength (higher = stronger regularization for small datasets)
   adam_beta1: 0.9              # Exponential decay rate for 1st moment estimates (standard value)
   adam_beta2: 0.999            # Exponential decay rate for 2nd moment estimates (standard value)
   adam_epsilon: 1e-8           # Small constant for numerical stability in Adam optimizer
   max_grad_norm: 1.0           # Gradient clipping threshold (prevents exploding gradients)
 
   # TRAINING DURATION
-  num_epochs: 50              # Total training epochs (small dataset overfits quickly, so monitor validation loss carefully)
-  warmup_steps: 50            # Linear LR warmup steps (proportional to dataset size; too many = slow start)
+  num_epochs: 20              # Total training epochs (small dataset overfits quickly, so monitor validation loss carefully)
+  warmup_steps: 10            # Linear LR warmup steps (proportional to dataset size; too many = slow start)
   lr_scheduler: "cosine"      # Learning rate schedule (cosine annealing: gradual LR reduction after warmup)
 
   # LOGGING & CHECKPOINTING
@@ -76,7 +76,7 @@ training:
   # GRADIENT ACCUMULATION
   # Effective batch size = batch_size × gradient_accumulation_steps
   # With batch_size=2, grad_accum=4 → effective_batch=8 (smoother gradients, larger effective batch)
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
 
 # ============================================================================
 # Output Configuration

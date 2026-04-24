@@ -1054,58 +1054,48 @@ class SAM3TrainerNative:
         out_dir = Path(self.config["output"]["output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        training_history = []
+        
+        if is_main_process():
+            with open(out_dir / "val_stats.json", "w") as f:
+                json.dump([], f)
+
         for epoch in range(epochs):
             # Set epoch for distributed sampler (required for proper shuffling)
             if self.multi_gpu and train_sampler is not None:
                 train_sampler.set_epoch(epoch)
 
-            # Track training losses for this epoch
-            train_losses = []
+            # 1. Initialize stats tracking for breakdown
+            epoch_train_stats = {}
+            train_steps = 0
 
             # Only show progress bar on rank 0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", disable=not is_main_process())
             for batch_dict in pbar:
-                input_batch = batch_dict["input"]
-
-                # Move to device
-                input_batch = move_to_device(input_batch, self.device)
+                input_batch = move_to_device(batch_dict["input"], self.device)
 
                 # Forward pass
-                # outputs_list is SAM3Output, we need to pass the whole thing to loss_wrapper
                 outputs_list = self.model(input_batch)
 
-                # Prepare targets for loss
-                # input_batch.find_targets is a list of BatchedFindTarget (one per stage)
+                # Prepare targets
                 find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
-
-                # Move targets to device
                 for targets in find_targets:
                     for k, v in targets.items():
                         if isinstance(v, torch.Tensor):
                             targets[k] = v.to(self.device)
 
-                # Add matcher indices to outputs (required by Sam3LossWrapper)
-                # Use SAM3Output.iteration_mode to properly iterate over outputs
-                with SAM3Output.iteration_mode(
-                    outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
-                ) as outputs_iter:
+                # Add matcher indices
+                with SAM3Output.iteration_mode(outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE) as outputs_iter:
                     for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
-                        # stage_targets is a single target dict, replicate for all steps
                         stage_targets_list = [stage_targets] * len(stage_outputs)
                         for outputs, targets in zip(stage_outputs, stage_targets_list):
-                            # Compute indices for main output
                             outputs["indices"] = self.matcher(outputs, targets)
-
-                            # Also add indices to auxiliary outputs if they exist
                             if "aux_outputs" in outputs:
                                 for aux_out in outputs["aux_outputs"]:
                                     aux_out["indices"] = self.matcher(aux_out, targets)
 
-                # Compute loss using Sam3LossWrapper
-                # This handles num_boxes calculation and proper weighting
+                # Compute loss
                 loss_dict = self.loss_wrapper(outputs_list, find_targets)
-
-                # Extract total loss
                 total_loss = loss_dict[CORE_LOSS_KEY]
 
                 # Backward
@@ -1113,41 +1103,38 @@ class SAM3TrainerNative:
                 total_loss.backward()
                 self.optimizer.step()
 
-                # Track training loss
-                train_losses.append(total_loss.item())
+                # Accumulate stats
+                train_steps += 1
+                for k, v in loss_dict.items():
+                    val = v.item() if isinstance(v, torch.Tensor) else v
+                    epoch_train_stats[k] = epoch_train_stats.get(k, 0.0) + val
+
                 pbar.set_postfix({"loss": total_loss.item()})
 
-            # Calculate average training loss for this epoch
-            avg_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0.0
+            # Calculate average training stats
+            avg_train_stats = {k: v / train_steps for k, v in epoch_train_stats.items()} if train_steps > 0 else {}
+            avg_train_loss = avg_train_stats.get(CORE_LOSS_KEY, 0.0)
 
-            # Validation (only compute loss - no metrics, like SAM3)
+            # --- Validation Section ---
+            avg_val_stats = {}
+            avg_val_loss = 0.0
             if has_validation and val_loader is not None:
                 self.model.eval()
-                val_losses = []
+                epoch_val_stats = {}
+                val_steps = 0
 
                 with torch.no_grad():
                     val_pbar = tqdm(val_loader, desc=f"Validation", disable=not is_main_process())
-
                     for batch_dict in val_pbar:
-                        input_batch = batch_dict["input"]
-                        input_batch = move_to_device(input_batch, self.device)
-
-                        # Forward pass
+                        input_batch = move_to_device(batch_dict["input"], self.device)
                         outputs_list = self.model(input_batch)
-
-                        # Prepare targets
                         find_targets = [self._unwrapped_model.back_convert(target) for target in input_batch.find_targets]
 
-                        # Move targets to device
                         for targets in find_targets:
                             for k, v in targets.items():
-                                if isinstance(v, torch.Tensor):
-                                    targets[k] = v.to(self.device)
+                                if isinstance(v, torch.Tensor): targets[k] = v.to(self.device)
 
-                        # Add matcher indices to outputs (required by Sam3LossWrapper)
-                        with SAM3Output.iteration_mode(
-                            outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
-                        ) as outputs_iter:
+                        with SAM3Output.iteration_mode(outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE) as outputs_iter:
                             for stage_outputs, stage_targets in zip(outputs_iter, find_targets):
                                 stage_targets_list = [stage_targets] * len(stage_outputs)
                                 for outputs, targets in zip(stage_outputs, stage_targets_list):
@@ -1156,51 +1143,98 @@ class SAM3TrainerNative:
                                         for aux_out in outputs["aux_outputs"]:
                                             aux_out["indices"] = self.matcher(aux_out, targets)
 
-                        # Compute loss using Sam3LossWrapper
                         loss_dict = self.loss_wrapper(outputs_list, find_targets)
-                        total_loss = loss_dict[CORE_LOSS_KEY]
+                        val_steps += 1
+                        for k, v in loss_dict.items():
+                            val = v.item() if isinstance(v, torch.Tensor) else v
+                            epoch_val_stats[k] = epoch_val_stats.get(k, 0.0) + val
+                        
+                        val_pbar.set_postfix({"val_loss": loss_dict[CORE_LOSS_KEY].item()})
 
-                        val_losses.append(total_loss.item())
-                        val_pbar.set_postfix({"val_loss": total_loss.item()})
+                avg_val_stats = {k: v / val_steps for k, v in epoch_val_stats.items()} if val_steps > 0 else {}
+                avg_val_loss = avg_val_stats.get(CORE_LOSS_KEY, 0.0)
 
-                avg_val_loss = sum(val_losses) / len(val_losses)
-
-                # Synchronize val_loss across all processes for consistent best model selection
                 if self.multi_gpu:
                     val_loss_tensor = torch.tensor([avg_val_loss], device=self.device)
                     dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
                     avg_val_loss = val_loss_tensor.item()
+                    avg_val_stats[CORE_LOSS_KEY] = avg_val_loss
 
-                print_rank0(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+            # --- Logging and Checkpointing (Rank 0 only) ---
+            if is_main_process():
+                def print_breakdown(stats, title):
+                    print(f"\n{'='*15} {title} {'='*15}")
+                    
+                    # Helper function to sum all layers (main + aux + o2m)
+                    def get_sum(base_key):
+                        return sum(v for k, v in stats.items() if k.startswith(base_key))
 
-                # Save models based on validation loss (only on rank 0)
-                if is_main_process():
-                    # Get underlying model from DDP wrapper
-                    model_to_save = self.model.module if self.multi_gpu else self.model
-                    save_lora_weights(model_to_save, str(out_dir / "last_lora_weights.pt"))
+                    bbox = get_sum('loss_bbox')
+                    giou = get_sum('loss_giou')
+                    ce = get_sum('loss_ce')
+                    pres = get_sum('presence_loss')
+                    mask = get_sum('loss_mask')
+                    dice = get_sum('loss_dice')
 
-                    if avg_val_loss < best_val_loss:
-                        best_val_loss = avg_val_loss
-                        save_lora_weights(model_to_save, str(out_dir / "best_lora_weights.pt"))
-                        print(f"✓ New best model saved (val_loss: {avg_val_loss:.6f})")
+                    # Localization
+                    loc_weighted = bbox * 5.0 + giou * 2.0
+                    print(f"📍 LOCALIZATION (Sum Weighted: {loc_weighted:.2f})")
+                    print(f"   └─ Box L1 (x5.0): {bbox:.4f} (all layers)")
+                    print(f"   └─ Box GIoU (x2.0): {giou:.4f} (all layers)")
+                    
+                    # Search & Class
+                    search_weighted = ce * 20.0 + pres * 20.0
+                    print(f"🔍 SEARCH & CLASS (Sum Weighted: {search_weighted:.2f})")
+                    print(f"   └─ Class CE (x20.0): {ce:.4f} (all layers)")
+                    print(f"   └─ Presence (x20.0): {pres:.4f} (all layers)")
+                    
+                    # Segmentation
+                    seg_weighted = mask * 200.0 + dice * 10.0
+                    print(f"🎭 SEGMENTATION (Sum Weighted: {seg_weighted:.2f})")
+                    print(f"   └─ Mask Focal (x200.0): {mask:.4f} (all layers)")
+                    print(f"   └─ Mask Dice (x10.0): {dice:.4f} (all layers)")
+                    
+                    print(f"--- TOTAL LOSS: {stats.get(CORE_LOSS_KEY, 0):.4f} ---")
 
-                    # Log to file
-                    with open(out_dir / "val_stats.json", "a") as f:
-                        f.write(json.dumps({
-                            "epoch": epoch + 1,
-                            "train_loss": avg_train_loss,
-                            "val_loss": avg_val_loss
-                        }) + "\n")
+                print_breakdown(avg_train_stats, f"EPOCH {epoch+1} TRAIN")
+                if has_validation:
+                    print_breakdown(avg_val_stats, f"EPOCH {epoch+1} VALIDATION")
 
-                torch.cuda.empty_cache()
+                # Saving weights
+                model_to_save = self.model.module if self.multi_gpu else self.model
+                save_lora_weights(model_to_save, str(out_dir / "last_lora_weights.pt"))
 
-                # Back to training mode
-                self.model.train()
-            else:
-                # No validation - just save model each epoch (only on rank 0)
-                if is_main_process():
-                    model_to_save = self.model.module if self.multi_gpu else self.model
-                    save_lora_weights(model_to_save, str(out_dir / "last_lora_weights.pt"))
+                # Checkpoint every 10 epochs
+                if (epoch + 1) % 10 == 0:
+                    ckpt_path = out_dir / f"checkpoint_epoch_{epoch+1}.pt"
+                    save_lora_weights(model_to_save, str(ckpt_path))
+                    print(f"💾 Periodic checkpoint saved: {ckpt_path.name}")
+
+                if has_validation and avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    save_lora_weights(model_to_save, str(out_dir / "best_lora_weights.pt"))
+                    print(f"✓ New best model saved (val_loss: {avg_val_loss:.6f})")
+
+                # Log to JSON
+                import datetime
+                
+                epoch_data = {
+                    "epoch": epoch + 1,
+                    "train_total_loss": avg_train_loss,
+                    "val_total_loss": avg_val_loss if has_validation else None,
+                    "train_breakdown": avg_train_stats,
+                    "val_breakdown": avg_val_stats if has_validation else None,
+                    "weights_info": {"bbox": 5.0, "giou": 2.0, "ce": 20.0, "presence": 20.0, "mask": 200.0, "dice": 10.0},
+                    "timestamp": str(datetime.datetime.now())
+                }
+                
+                training_history.append(epoch_data)
+
+                with open(out_dir / "val_stats.json", "w") as f:
+                    json.dump(training_history, f, indent=4)
+
+            torch.cuda.empty_cache()
+            self.model.train()
 
         # Synchronize before final save
         if self.multi_gpu:

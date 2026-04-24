@@ -61,7 +61,7 @@ def merge_and_split_data(raw_dir_path, train_ratio=0.8, val_ratio=0.1):
         for img in coco.get("images", []):
             source_path = img_dir / img["file_name"]
 
-            # Alert if image is physically missing (e.g. case sensitivity in extensions .JPG vs .jpg)
+            # Alert if image is physically missing (e.g., case sensitivity in extensions .JPG vs .jpg)
             if not source_path.exists():
                 print(f"    [!] Missing image: {img['file_name']} (Check extension case)")
                 missing_images_count += 1
@@ -124,7 +124,7 @@ def merge_and_split_data(raw_dir_path, train_ratio=0.8, val_ratio=0.1):
     return splits, img_id_to_anns, base_coco
 
 
-def process_split(split_name, images_list, img_id_to_anns, base_coco, min_area=200, do_tiling=True):
+def process_split(split_name, images_list, img_id_to_anns, base_coco, min_area=500, tiling_grid=(1, 1)):
     out_dir = Path(f"data/{split_name}")
 
     if out_dir.exists():
@@ -132,7 +132,9 @@ def process_split(split_name, images_list, img_id_to_anns, base_coco, min_area=2
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n--- Step 3: Processing {split_name} (Slicing: {'ON' if do_tiling else 'OFF'}) ---")
+    rows, cols = tiling_grid
+    is_tiled = rows > 1 or cols > 1
+    print(f"\n--- Step 3: Processing {split_name} (Slicing Grid: {rows}x{cols}) ---")
 
     new_coco = {
         "info": base_coco.get("info", {}),
@@ -156,12 +158,8 @@ def process_split(split_name, images_list, img_id_to_anns, base_coco, min_area=2
 
         h, w = image.shape[:2]
 
-        if do_tiling:
-            rows, cols = 2, 2
-            tile_w, tile_h = w // 2, h // 2
-        else:
-            rows, cols = 1, 1
-            tile_w, tile_h = w, h
+        # Calculate tile dimensions
+        tile_w, tile_h = w // cols, h // rows
 
         unified_img_id = img_info["id"]
         anns = img_id_to_anns.get(unified_img_id, [])
@@ -176,7 +174,7 @@ def process_split(split_name, images_list, img_id_to_anns, base_coco, min_area=2
 
                 tile_img = image[y_off:y_off+tile_h, x_off:x_off+tile_w]
 
-                if do_tiling:
+                if is_tiled:
                     tile_filename = f"{batch_name}_{orig_name}_tile_{row}_{col}.jpg"
                 else:
                     tile_filename = f"{batch_name}_{orig_name}.jpg"
@@ -200,6 +198,7 @@ def process_split(split_name, images_list, img_id_to_anns, base_coco, min_area=2
                     tile_mask = np.zeros((tile_h, tile_w), dtype=np.uint8)
                     valid_polys = []
 
+                    # Shift polygons according to the current tile offset
                     for poly in seg:
                         if len(poly) >= 6:
                             pts = np.array(poly, np.int32).reshape((-1, 1, 2))
@@ -247,17 +246,18 @@ def process_split(split_name, images_list, img_id_to_anns, base_coco, min_area=2
 
     kept_count = len(new_coco['annotations'])
     removed_count = original_ann_count - kept_count
-    print(f"[Success] {split_name}: Saved {kept_count} out of {original_ann_count} annotations (Removed small islands: {removed_count})")
+    print(f"[Success] {split_name}: Saved {kept_count} out of {original_ann_count} annotations (Removed small islands/out of bounds: {removed_count})")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Aggregate, split and clean COCO dataset")
+    parser = argparse.ArgumentParser(description="Aggregate, split and clean COCO dataset with customizable grid tiling")
     parser.add_argument("--raw-dir", type=str, default="data/raw", help="Path to raw directory containing batches")
-    parser.add_argument("--no-tiling", action="store_true", help="Disable 2x2 image slicing")
-    parser.add_argument("--min-area", type=int, default=200, help="Minimum area threshold for objects")
+    parser.add_argument("--tiling", type=int, nargs=2, default=[1, 1], help="Grid for image slicing (rows cols). Default is 1 1 (no slicing). Example: --tiling 4 4")
+    parser.add_argument("--min-area", type=int, default=500, help="Minimum area threshold for objects")
     args = parser.parse_args()
 
-    do_tiling = not args.no_tiling
+    # Extract rows and cols from the parsed argument
+    tiling_grid = tuple(args.tiling)
 
     splits, img_id_to_anns, base_coco = merge_and_split_data(args.raw_dir)
 
@@ -269,5 +269,5 @@ if __name__ == "__main__":
                 img_id_to_anns=img_id_to_anns,
                 base_coco=base_coco,
                 min_area=args.min_area,
-                do_tiling=do_tiling
+                tiling_grid=tiling_grid
             )

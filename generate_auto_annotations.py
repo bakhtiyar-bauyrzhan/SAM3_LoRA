@@ -153,8 +153,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🔧 Settings are loaded from {args.config}")
     
-    # Читаем значение из конфига (по умолчанию 200, если не задано)
-    config_min_area = cfg.get('inference', {}).get('min_area', 200)
+    config_min_area = cfg.get('inference', {}).get('min_area', 500)
     
     image_paths = [os.path.join(args.image_dir, f) for f in os.listdir(args.image_dir) 
                    if Path(f).suffix.lower() in {'.jpg', '.jpeg', '.png'}]

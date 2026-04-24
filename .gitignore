@@ -72,3 +72,7 @@ Thumbs.db
 *.tmp
 *.temp
 .hf_home/
+
+data_cropped/
+data_res/
+data_mixed/
